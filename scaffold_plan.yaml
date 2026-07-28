@@ -1,0 +1,248 @@
+schema_version: 1
+task_type: single_step
+task_name: implement-an-openssl-signed-firmware-release-publisher-for-express-001
+decisions:
+- Raised [agent].timeout_sec to the 900s Scaffold floor; seed metadata.timeouts.run_seconds
+  was 300s. Kept [verifier].timeout_sec at 300s since grading (report diff + DuckDB/gateway
+  state checks) is fast.
+- Added 'sql' to [metadata].languages; the reconciliation step is SQL-over-DuckDB per
+  the seed's stated target languages.
+- 'Chose category=security: the crux is cryptographic (detached OpenSSL CMS signing,
+  key rotation, UNTRUSTED_SIGNATURE verification); api_integration and db_interaction
+  capture the Express gateway and DuckDB/SQL dimensions as subcategories.'
+- 'Single container (multi_container=false): the publisher talks to the Express gateway
+  over localhost HTTP. The verifier starts the gateway as a background process (runtime.port=7070)
+  before running assertions.'
+- 'Modeled the provided Express distribution gateway as environment.code_projects[]
+  (multi-file Express app + OpenSSL CMS verification + key-metadata fixtures) rather
+  than files_to_write[]: it is a coherent multi-file project the candidate runs and queries.'
+- The publisher/release-publisher.mjs the candidate must implement is the CANDIDATE'S
+  solution and is deliberately NOT synthesized; only the environment it runs against
+  is synthesized.
+- Signing keypairs (current + revoked) are generated at image BUILD time via openssl
+  (self-signed X.509 + key), not shipped as static PEM fixtures, so CMS signatures verify
+  cryptographically. The revoked keypair reproduces the UNTRUSTED_SIGNATURE rotation
+  scenario; the current private key is placed where the publisher reads it and the current
+  certificate where the gateway reads it to verify.
+- CLI output snapshots capture DETERMINISTIC status lines (bundle id, action, receipt/request-token,
+  status), NOT raw CMS signature bytes; CMS output is non-deterministic (timestamps),
+  so signature validity is confirmed live by the gateway accepting the descriptor.
+- Pinned the canonical descriptor format to UTF-8 JSON with lexicographically sorted
+  keys and no insignificant whitespace, so the publisher's signed bytes and the gateway's
+  verification bytes agree.
+- Chose the DuckDB Node bindings (npm 'duckdb') for the publisher's CSV import + SQL
+  reconciliation + receipt persistence, matching the JavaScript target language.
+- Chose Node's built-in test runner (node --test) for the gateway's internal tests to
+  avoid an extra test-framework dependency (requires Node >= 18, which also provides
+  global fetch).
+- The gateway's internal persistence is a JSON file (gateway.json) created lazily at
+  runtime by lib/publication-store.js under the data dir (container path /app/distribution-gateway/data/),
+  not a pre-shipped database.
+repositories: []
+verifier:
+  mode: shared
+  mode_rationale: 'No proprietary grader and no OS/dependency mismatch: the verifier
+    runs pytest in the same container, starts the provided Express gateway as a background
+    process, drives npm run report, and inspects DuckDB state and gateway receipts.'
+  build: null
+  artifacts_required: []
+environment:
+  multi_container: false
+  repositories_used: []
+  files_to_write:
+  - path: environment/fixtures/build_manifest.csv
+    purpose: Input build manifest the publisher imports into DuckDB and reconciles into
+      publishable bundles.
+    content_hint: '~40 rows of a build manifest with columns {entry_id, bundle_id, component_id,
+      version, size_bytes, record_type, supersedes_id, recorded_at}. record_type includes
+      BUILD and WITHDRAWAL rows (a withdrawal cancels a prior build via supersedes_id),
+      plus a few exact-duplicate rows. Data must exercise: withdrawal reconciliation,
+      duplicate suppression, and multiple distinct publishable bundles so ordering determinism
+      is testable.'
+  - path: environment/package.json
+    purpose: Root Node package scaffolding that defines the `npm run report` entry point
+      (invokes the candidate's publisher) and declares the publisher's runtime dependency
+      (duckdb bindings).
+    content_hint: 'ESM package ("type": "module") with a "scripts": { "report": "node
+      publisher/release-publisher.mjs --report" } entry and a dependency on the duckdb
+      Node package. The referenced publisher/release-publisher.mjs is written by the
+      candidate, not shipped.'
+  - path: environment/reports/publications.expected.txt
+    purpose: Golden CLI output the verifier diffs `npm run report` against.
+    content_hint: Deterministic, line-per-bundle status lines in a stable order, e.g.
+      `BUNDLE <id> SIGNED KEY=<current-key-id>` / `BUNDLE <id> PUBLISHED RECEIPT=<id>
+      TOKEN=<token> STATUS=PUBLISHED`. The RECEIPT value is masked by the verifier.
+  - path: environment/.gitignore
+    purpose: 'Hygiene: keep candidate/runtime artifacts (releases.duckdb, node_modules,
+      generated report output) out of the baseline tree.'
+    content_hint: Ignore node_modules/, releases.duckdb, and generated report output.
+  code_projects:
+  - id: distribution_gateway
+    path: environment/distribution-gateway
+    languages:
+    - js
+    framework: express
+    purpose: 'The Express distribution gateway the release publisher integrates with:
+      it serves the current signing-key metadata the publisher fetches, and it accepts
+      POSTed signed release descriptors, verifying the detached OpenSSL CMS signature
+      against the current certificate and rejecting descriptors signed with the revoked
+      certificate as UNTRUSTED_SIGNATURE.'
+    acceptance:
+    - GET /v1/signing-key/current returns 200 with the current key's key id and signing
+      algorithm.
+    - POST /v1/publications with a descriptor whose detached CMS signature was produced
+      by the CURRENT key returns a success receipt containing a publication id, the echoed
+      request token, and status PUBLISHED.
+    - POST /v1/publications with a descriptor signed by the REVOKED key returns an error
+      response that identifies UNTRUSTED_SIGNATURE and persists nothing.
+    - POST /v1/publications repeated with the same request token returns the original
+      receipt and does not create a second publication row.
+    - The gateway starts with `node server.js` and listens on port 7070.
+    boundary_constraints:
+    - Implement the gateway fully and correctly; plant NO intentional bugs. The
+      UNTRUSTED_SIGNATURE incident is caused by the publisher signing with the revoked
+      key, not by any gateway defect.
+    - Signature verification must use OpenSSL CMS against the current certificate; do
+      not add any verification-bypass path or debug flag that skips verification.
+    - Expose publication state only through the documented endpoints; keep the gateway's
+      ledger internal so the publisher cannot read it directly.
+    ships_tests: true
+    runtime:
+      entrypoint: node server.js
+      port: 7070
+      deps:
+      - language: js
+        spec: express@4.19.2
+      test_commands:
+      - language: js
+        command: cd distribution-gateway && node --test tests/
+      api_endpoints:
+      - method: GET
+        path: /v1/signing-key/current
+        success_status: 200
+        response_body:
+          key_id: string
+          algorithm: string
+          certificate_ref: string
+          status: current
+      - method: POST
+        path: /v1/publications
+        success_status: 200
+        request_body:
+          descriptor: canonical JSON payload (UTF-8, sorted keys)
+          signature: detached CMS signature (PEM)
+          request_token: string
+        response_body:
+          publication_id: string
+          request_token: string
+          status: PUBLISHED
+      persistence:
+        type: file
+        description: JSON publication ledger created lazily at runtime by lib/publication-store.js
+          under the container data dir (runtime path /app/distribution-gateway/data/gateway.json).
+          Not shipped as a baseline fixture and must not be pre-created.
+        tables:
+        - name: publications
+          purpose: Accepted release bundles keyed by publication id, storing the request
+            token and status; the source of idempotent-replay receipts.
+    seed_data:
+    - kind: json
+      path: fixtures/current-key.json
+      notes: Current signing-key metadata served by GET /v1/signing-key/current.
+    - kind: json
+      path: fixtures/revoked-key.json
+      notes: Revoked signing-key metadata retained so the rotation scenario and
+        UNTRUSTED_SIGNATURE path are representable.
+    intentional_bugs: []
+    components: []
+  notes: 'Base image node:20-slim (Node >=18 for global fetch and node --test). Dockerfile
+    additionally: (1) apt-get install openssl; (2) generate the CURRENT and REVOKED signing
+    keypairs at build time via openssl (self-signed X.509 cert + private key each); (3)
+    install the gateway npm deps (express); (4) install the publisher''s duckdb Node dependency.
+    The candidate implements publisher/release-publisher.mjs; do not ship it.
+    releases.duckdb is created by the publisher at run time and must not be pre-created.'
+tests:
+  functional_criteria:
+  - id: report_output_matches
+    description: Running `npm run report` produces CLI status lines that match the expected
+      golden output exactly, including a stable, deterministic ordering of bundles across
+      repeated runs.
+    maps_to_plan_clause: make `npm run report` match the expected CLI output ... keep
+      output ordering deterministic
+  - id: withdrawals_and_duplicates_reconciled
+    description: The bundles derived from the build manifest via SQL exclude withdrawn
+      builds (a withdrawal cancels its referenced build) and collapse duplicate manifest
+      rows, so bundle membership reflects the reconciled manifest rather than the raw CSV.
+    maps_to_plan_clause: reconcile withdrawn builds and duplicate manifest rows with SQL,
+      ... use SQL to derive publishable bundles
+  - id: bundles_signed_with_current_key_accepted
+    description: Signed descriptors submitted to POST /v1/publications are accepted (status
+      PUBLISHED, not UNTRUSTED_SIGNATURE), demonstrating the publisher signs with the
+      current certificate/key rather than the revoked one.
+    maps_to_plan_clause: sign canonical release descriptors using OpenSSL ... create
+      detached OpenSSL CMS signatures with the current PEM keypair ... Do not bypass verification
+  - id: receipts_and_tokens_persisted_in_duckdb
+    description: After a run, releases.duckdb contains the gateway receipts and request
+      tokens returned by the gateway for each submitted bundle.
+    maps_to_plan_clause: The publisher records gateway receipts and request tokens in
+      the database ... persist receipts and retry state in DuckDB
+  - id: idempotent_rerun_no_duplicate_publications
+    description: Re-running the publisher reuses the persisted request tokens / retry
+      state so bundles are not double-submitted; the gateway returns the original receipts
+      and no duplicate publications are created.
+    maps_to_plan_clause: persist receipts and retry state in DuckDB ... records gateway
+      receipts and request tokens
+  - id: revoked_key_signature_rejected
+    description: A descriptor signed with the revoked key is rejected by the gateway as
+      UNTRUSTED_SIGNATURE and produces no accepted receipt (guards that verification is
+      real and not bypassed).
+    maps_to_plan_clause: Release bundles are being rejected with UNTRUSTED_SIGNATURE after
+      release engineering rotated the code-signing key ... do not bypass signature verification
+  fixtures_consumed:
+  - environment/fixtures/build_manifest.csv
+  - environment/package.json
+  - environment/reports/publications.expected.txt
+  process_rubric:
+    requested: false
+    rationale: seed.metadata.emit_process_rubric is false; the functional criteria are
+      observable and sufficient for binary grading.
+thresholds:
+- name: gateway_port
+  value: 7070
+  rationale: Port the Express distribution gateway listens on; verifier starts it as a
+    background process and the publisher POSTs to it.
+- name: cms_signature_spec
+  value: detached CMS, SHA-256 digest, PEM-encoded, verified with `openssl cms -verify`
+    against the current certificate
+  rationale: Pins the signature format so the publisher's signing and the gateway's verification
+    agree.
+- name: canonical_descriptor_format
+  value: UTF-8 JSON, lexicographically sorted object keys, no insignificant whitespace
+  rationale: The exact bytes that get signed and verified must be identical on both sides.
+- name: build_manifest_row_count
+  value: 40
+  rationale: Approximate fixture size that includes withdrawals, duplicates, and multiple
+    publishable bundles so reconciliation and ordering are testable.
+open_questions:
+- question: Which columns constitute a 'duplicate manifest row' that must be collapsed
+    during reconciliation (identical (entry_id) vs. identical across every column)? Only
+    the exact-across-all-columns invariant is graded.
+  affects: tests
+- question: What is the exact rule by which a withdrawal cancels a prior build — supersede
+    by entry_id, must sizes/versions match, are partial withdrawals possible? Only the
+    bundle-membership invariant is graded.
+  affects: tests
+seed:
+  task_description: 'Release bundles are being rejected with UNTRUSTED_SIGNATURE after
+    release engineering rotated the firmware code-signing key. A JavaScript background
+    publisher must import the build manifest CSV into DuckDB, reconcile withdrawn builds
+    and duplicate manifest rows with SQL, sign canonical release descriptors using OpenSSL,
+    and submit them to the included Express distribution gateway. The publisher records
+    gateway receipts and request tokens in the database, then emits deterministic status
+    lines that are checked against CLI output snapshots.'
+  metadata:
+    os: linux
+    timeouts:
+      build_seconds: 600
+      run_seconds: 300
+    emit_process_rubric: false

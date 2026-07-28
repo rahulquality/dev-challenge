@@ -1,0 +1,6 @@
+{
+  "key_id": "fw-signing-2025-revoked",
+  "algorithm": "sha256WithRSAEncryption",
+  "certificate_ref": "/app/keys/revoked/revoked.cert.pem",
+  "status": "revoked"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "distribution-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Firmware distribution gateway: serves the current signing-key metadata and accepts CMS-signed release descriptors.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "express": "4.19.2"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "key_id": "fw-signing-2026-current",
+  "algorithm": "sha256WithRSAEncryption",
+  "certificate_ref": "/app/keys/current/current.cert.pem",
+  "status": "current"
+}

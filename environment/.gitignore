@@ -1,0 +1,25 @@
+# Node dependencies
+node_modules/
+
+# DuckDB database files and write-ahead logs
+releases.duckdb
+*.duckdb
+*.duckdb.wal
+
+# Generated report output written by the publisher at runtime.
+# The committed golden lives at reports/publications.expected.txt and stays tracked.
+reports/publications.actual.txt
+/publications.actual.txt
+
+# Distribution gateway runtime ledger (keep the .gitkeep placeholder tracked)
+distribution-gateway/data/*.json
+distribution-gateway/data/*.db
+!distribution-gateway/data/.gitkeep
+
+# Note: build-time signing keys are generated inside the image, not in this tree,
+# so there is nothing to ignore here.
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store

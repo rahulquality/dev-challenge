@@ -1,0 +1,14 @@
+{
+  "name": "release-publisher",
+  "version": "1.0.0",
+  "description": "Firmware release publisher backed by DuckDB",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "report": "node publisher/release-publisher.mjs --report"
+  },
+  "dependencies": {
+    "duckdb": "1.1.3"
+  }
+}
